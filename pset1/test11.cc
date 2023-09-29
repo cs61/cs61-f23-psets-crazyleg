@@ -22,6 +22,7 @@ int main() {
         int (*mainptr)();
     } x;
     x.iptr = &global;
+
     assert(x.addr + sizeof(int) < stat.heap_min || x.addr >= stat.heap_max);
     x.statptr = &stat;
     assert(x.addr + sizeof(int) < stat.heap_min || x.addr >= stat.heap_max);

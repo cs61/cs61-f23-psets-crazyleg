@@ -9,6 +9,7 @@ int main() {
     }
     for (int i = 0; i != 5; ++i) {
         m61_free(ptrs[i]);
+        
     }
     m61_print_statistics();
 }

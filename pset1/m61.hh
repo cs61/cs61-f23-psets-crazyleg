@@ -26,6 +26,7 @@ void* m61_calloc(size_t count, size_t sz, const char* file = __builtin_FILE(), i
 /// m61_statistics
 ///    Structure tracking memory statistics.
 struct m61_statistics {
+    m61_statistics(); 
     unsigned long long nactive;         // # active allocations
     unsigned long long active_size;     // # bytes in active allocations
     unsigned long long ntotal;          // # total allocations
