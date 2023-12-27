@@ -63,6 +63,9 @@ void kernel_start(const char* command) {
     // (re-)initialize kernel page table
     for (uintptr_t addr = 0; addr < MEMSIZE_PHYSICAL; addr += PAGESIZE) {
         int perm = PTE_P | PTE_W | PTE_U;
+        if ((addr < PROC_START_ADDR) && (addr != CONSOLE_ADDR)) {
+            perm = PTE_P | PTE_W ;
+        }; 
         if (addr == 0) {
             // nullptr is inaccessible even to the kernel
             perm = 0;
@@ -162,14 +165,24 @@ void process_setup(pid_t pid, const char* program_name) {
     init_process(&ptable[pid], 0);
 
     // initialize process page table
-    ptable[pid].pagetable = kernel_pagetable;
+    ptable[pid].pagetable = kalloc_pagetable();
 
     // obtain reference to program image
     // (The program image models the process executable.)
     program_image pgm(program_name);
+   
+    auto r = vmiter(ptable[pid].pagetable, 0);
+    for (auto it = vmiter(kernel_pagetable, 0); it.va() < PROC_START_ADDR; it+=PAGESIZE) {
+        if (it.present()) {    
+            r.map(it.pa(),it.perm());
+        }
+
+        r += PAGESIZE;
+    }
 
     // allocate and map process memory as specified in program image
     for (auto seg = pgm.begin(); seg != pgm.end(); ++seg) {
+        log_printf("starting process init pid %d , va %d \n", pid, seg.va());
         for (uintptr_t a = round_down(seg.va(), PAGESIZE);
              a < seg.va() + seg.size();
              a += PAGESIZE) {
@@ -178,6 +191,7 @@ void process_setup(pid_t pid, const char* program_name) {
             // address is currently free.)
             assert(physpages[a / PAGESIZE].refcount == 0);
             ++physpages[a / PAGESIZE].refcount;
+            vmiter(ptable[pid].pagetable,a).map(a, PTE_P | PTE_W | PTE_U); 
         }
     }
 
@@ -186,7 +200,6 @@ void process_setup(pid_t pid, const char* program_name) {
         memset((void*) seg.va(), 0, seg.size());
         memcpy((void*) seg.va(), seg.data(), seg.data_size());
     }
-
     // mark entry point
     ptable[pid].regs.reg_rip = pgm.entry();
 
@@ -198,6 +211,7 @@ void process_setup(pid_t pid, const char* program_name) {
     assert(physpages[stack_addr / PAGESIZE].refcount == 0);
     ++physpages[stack_addr / PAGESIZE].refcount;
     ptable[pid].regs.reg_rsp = stack_addr + PAGESIZE;
+    vmiter(ptable[pid].pagetable,stack_addr).map(stack_addr, PTE_P | PTE_W | PTE_U); 
 
     // mark process as runnable
     ptable[pid].state = P_RUNNABLE;
@@ -354,6 +368,7 @@ int syscall_page_alloc(uintptr_t addr) {
     assert(physpages[addr / PAGESIZE].refcount == 0);
     ++physpages[addr / PAGESIZE].refcount;
     memset((void*) addr, 0, PAGESIZE);
+    vmiter(current->pagetable, addr).map(addr, PTE_P | PTE_W | PTE_U);
     return 0;
 }
 
