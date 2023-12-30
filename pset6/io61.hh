@@ -8,6 +8,7 @@
 #include <random>
 #include <unistd.h>
 #include <fcntl.h>
+#include <mutex>
 #include <sched.h>
 
 struct io61_file;

@@ -3,7 +3,7 @@
 #include <sys/stat.h>
 #include <climits>
 #include <cerrno>
-
+#include <mutex>
 // io61.cc
 //    YOUR CODE HERE!
 
@@ -40,6 +40,7 @@ io61_file* io61_fdopen(int fd, int mode) {
     io61_file* f = new io61_file;
     f->fd = fd;
     f->mode = mode;
+    std::lock_guard<std::recursive_mutex> lk(m);
    
     return f;
 }

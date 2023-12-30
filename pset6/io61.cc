@@ -1,7 +1,6 @@
 #include "io61.hh"
 #include <climits>
 #include <cerrno>
-#include <mutex>
 #include <shared_mutex>
 #include <condition_variable>
 #include <sys/types.h>
@@ -29,6 +28,9 @@ struct io61_file {
     // Positioned mode
     bool dirty = false;       // has cache been written?
     bool positioned = false;  // is cache in positioned mode?
+
+    // Mutexes 
+    std::recursive_mutex m;
 };
 
 
@@ -371,10 +373,9 @@ int io61_try_lock(io61_file* f, off_t start, off_t len, int locktype) {
     (void) f;
     assert(start >= 0 && len >= 0);
     assert(locktype == LOCK_EX || locktype == LOCK_SH);
-    if (len == 0) {
-        return 0;
-    }
-    return 0;
+    int result = f->m.try_lock();
+    if (result) {return 0;}
+    return -1;
 }
 
 
@@ -389,10 +390,7 @@ int io61_try_lock(io61_file* f, off_t start, off_t len, int locktype) {
 
 int io61_lock(io61_file* f, off_t start, off_t len, int locktype) {
     assert(start >= 0 && len >= 0);
-    assert(locktype == LOCK_EX || locktype == LOCK_SH);
-    if (len == 0) {
-        return 0;
-    }
+    assert(locktype == LOCK_EX || locktype == LOCK_SH); 
     // The handout code polls using `io61_try_lock`.
     while (io61_try_lock(f, start, len, locktype) != 0) {
     }
@@ -407,9 +405,7 @@ int io61_lock(io61_file* f, off_t start, off_t len, int locktype) {
 int io61_unlock(io61_file* f, off_t start, off_t len) {
     (void) f;
     assert(start >= 0 && len >= 0);
-    if (len == 0) {
-        return 0;
-    }
+    f->m.unlock(); 
     return 0;
 }
 
