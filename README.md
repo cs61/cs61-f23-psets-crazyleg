@@ -12,3 +12,5 @@ Currently present solutions:
 
  - Pset 1 - up to problem 31
  - Pset 3 - Weensy OS - full solution Sets 1-7
+ - Pset 4 - great performance on sequential and random, reverse is TBD 
+ - Pset 6 - Phase 1 - shared global mutex - done
