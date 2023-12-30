@@ -181,12 +181,6 @@ void process_setup(pid_t pid, const char* program_name) {
 
         r += PAGESIZE;
     }
-    int pageno = 0;
-    for (int tries = 0; tries != NPAGES; ++tries) {
-        uintptr_t pa = pageno * PAGESIZE;
-        log_printf("page number %d is %d and has refcount %d\n", pageno, allocatable_physical_address(pa), physpages[pageno].refcount);    
-        pageno = (pageno + 1) % NPAGES;
-    }
 
     // allocate and map process memory as specified in program image
     for (auto seg = pgm.begin(); seg != pgm.end(); ++seg) {
@@ -201,7 +195,11 @@ void process_setup(pid_t pid, const char* program_name) {
             // address is currently free.)
             // assert(physpages[(uintptr_t)ptr].refcount == 0);
             // ++physpages[(uintptr_t)ptr].refcount;
-            vmiter(ptable[pid].pagetable,a).map(ptr, PTE_P | PTE_W | PTE_U); 
+            if (seg.writable()) {
+                vmiter(ptable[pid].pagetable,a).map(ptr, PTE_P | PTE_U | PTE_W); 
+            } else {
+                vmiter(ptable[pid].pagetable,a).map(ptr, PTE_P | PTE_U); 
+            }
         }
     }
 
@@ -455,6 +453,16 @@ pid_t fork(){
     // Allocate memory for a child process
     for (auto old_pt = vmiter(current->pagetable, PROC_START_ADDR); old_pt.va() < MEMSIZE_VIRTUAL; old_pt+=PAGESIZE) {
         if (!old_pt.present() || !old_pt.user()) {continue;}
+        if (!old_pt.writable()){
+            int result = vmiter(ptable[new_pr_pid].pagetable,old_pt.va()).try_map(old_pt.pa(), old_pt.perm());
+            if (result==-1) {
+                log_printf("master prelim pagetable returning new PID %d\n", new_pr_pid);
+                exit(new_pr_pid); 
+                return -1;
+            }
+            ++physpages[old_pt.pa()/PAGESIZE].refcount;
+            continue;
+        }
 
         void* ptr = kalloc(PAGESIZE);
         if (!ptr) {
