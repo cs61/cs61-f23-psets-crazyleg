@@ -179,6 +179,12 @@ void process_setup(pid_t pid, const char* program_name) {
 
         r += PAGESIZE;
     }
+    int pageno = 0;
+    for (int tries = 0; tries != NPAGES; ++tries) {
+        uintptr_t pa = pageno * PAGESIZE;
+        log_printf("page number %d is %d and has refcount %d\n", pageno, allocatable_physical_address(pa), physpages[pageno].refcount);    
+        pageno = (pageno + 1) % NPAGES;
+    }
 
     // allocate and map process memory as specified in program image
     for (auto seg = pgm.begin(); seg != pgm.end(); ++seg) {
@@ -186,32 +192,35 @@ void process_setup(pid_t pid, const char* program_name) {
         for (uintptr_t a = round_down(seg.va(), PAGESIZE);
              a < seg.va() + seg.size();
              a += PAGESIZE) {
+            
+            void* ptr = kalloc(PAGESIZE);
             // `a` is the process virtual address for the next code or data page
             // (The handout code requires that the corresponding physical
             // address is currently free.)
-            assert(physpages[a / PAGESIZE].refcount == 0);
-            ++physpages[a / PAGESIZE].refcount;
-            vmiter(ptable[pid].pagetable,a).map(a, PTE_P | PTE_W | PTE_U); 
+            // assert(physpages[(uintptr_t)ptr].refcount == 0);
+            ++physpages[(uintptr_t)ptr].refcount;
+            vmiter(ptable[pid].pagetable,a).map(ptr, PTE_P | PTE_W | PTE_U); 
         }
     }
 
     // copy instructions and data from program image into process memory
     for (auto seg = pgm.begin(); seg != pgm.end(); ++seg) {
-        memset((void*) seg.va(), 0, seg.size());
-        memcpy((void*) seg.va(), seg.data(), seg.data_size());
+        auto address_in_p_memory = vmiter(ptable[pid].pagetable,seg.va()).pa();
+        memset((void*) address_in_p_memory, 0, seg.size());
+        memcpy((void*) address_in_p_memory, seg.data(), seg.data_size());
     }
     // mark entry point
     ptable[pid].regs.reg_rip = pgm.entry();
 
     // allocate and map stack segment
     // Compute process virtual address for stack page
-    uintptr_t stack_addr = PROC_START_ADDR + PROC_SIZE * pid - PAGESIZE;
+    uintptr_t stack_addr = MEMSIZE_VIRTUAL - PAGESIZE;
+    void* ptr = kalloc(PAGESIZE);
+    ++physpages[(uintptr_t)ptr].refcount;
     // The handout code requires that the corresponding physical address
     // is currently free.
-    assert(physpages[stack_addr / PAGESIZE].refcount == 0);
-    ++physpages[stack_addr / PAGESIZE].refcount;
     ptable[pid].regs.reg_rsp = stack_addr + PAGESIZE;
-    vmiter(ptable[pid].pagetable,stack_addr).map(stack_addr, PTE_P | PTE_W | PTE_U); 
+    vmiter(ptable[pid].pagetable,stack_addr).map(ptr, PTE_P | PTE_W | PTE_U); 
 
     // mark process as runnable
     ptable[pid].state = P_RUNNABLE;
@@ -348,6 +357,9 @@ uintptr_t syscall(regstate* regs) {
 
     case SYSCALL_PAGE_ALLOC:
         return syscall_page_alloc(current->regs.reg_rdi);
+    
+    case SYSCALL_FORK:
+        return fork();
 
     default:
         proc_panic(current, "Unhandled system call %ld (pid=%d, rip=%p)!\n",
@@ -365,10 +377,16 @@ uintptr_t syscall(regstate* regs) {
 //    in `u-lib.hh` (but in the handout code, it does not).
 
 int syscall_page_alloc(uintptr_t addr) {
-    assert(physpages[addr / PAGESIZE].refcount == 0);
-    ++physpages[addr / PAGESIZE].refcount;
-    memset((void*) addr, 0, PAGESIZE);
-    vmiter(current->pagetable, addr).map(addr, PTE_P | PTE_W | PTE_U);
+    if (addr % PAGESIZE || addr < PROC_START_ADDR || addr >= MEMSIZE_VIRTUAL) {
+		return -1;
+	}
+
+    void* ptr = kalloc(PAGESIZE);
+    if (!ptr) {
+		return -1;
+	}
+    memset((void*) ptr, 0, PAGESIZE);
+    vmiter(current->pagetable, addr).map(ptr, PTE_P | PTE_W | PTE_U);
     return 0;
 }
 
@@ -396,6 +414,43 @@ void schedule() {
     }
 }
 
+pid_t fork(){
+    // find free PID
+    pid_t new_pr_pid  = 1;
+    while ((ptable[new_pr_pid].state != P_FREE)&&(new_pr_pid<PID_MAX)) {++new_pr_pid;}
+    log_printf("master new PID %d\n", new_pr_pid);
+    if ( new_pr_pid==PID_MAX ){ log_printf("master return"); return -1; }
+
+    ptable[new_pr_pid].pagetable = kalloc_pagetable();
+    ptable[new_pr_pid].pid = new_pr_pid;
+    ptable[new_pr_pid].state = P_RUNNABLE;
+    // Setting return value to child, so it known it is a child
+    ptable[new_pr_pid].regs = ptable[current->pid].regs;
+    ptable[new_pr_pid].regs.reg_rax = 0;
+
+    // Copy memory of kernel
+    for (auto old_pt = vmiter(current->pagetable, 0); old_pt.va() < PROC_START_ADDR; old_pt+=PAGESIZE) {
+        if (!old_pt.present()) {continue;}
+        vmiter(ptable[new_pr_pid].pagetable,old_pt.va()).map(old_pt.pa(), old_pt.perm());
+    }
+
+    // Allocate memory for a child process
+    for (auto old_pt = vmiter(current->pagetable, PROC_START_ADDR); old_pt.va() <= MEMSIZE_VIRTUAL; old_pt+=PAGESIZE) {
+        if (!old_pt.present() || !old_pt.user()) {continue;}
+
+        void* ptr = kalloc(PAGESIZE);
+        if (!ptr) {
+            log_printf("master prelim returning new PID %d\n", new_pr_pid);
+            return -1;
+        }
+        memcpy(ptr, (void*)old_pt.pa(), PAGESIZE);
+        ++physpages[(uintptr_t)ptr / PAGESIZE].refcount;
+        vmiter(ptable[new_pr_pid].pagetable,old_pt.va()).map(ptr, old_pt.perm());
+    }
+    log_printf("master returning new PID %d\n", new_pr_pid);
+
+    return new_pr_pid;
+}
 
 // run(p)
 //    Run process `p`. This involves setting `current = p` and calling

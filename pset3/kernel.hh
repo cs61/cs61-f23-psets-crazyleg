@@ -130,6 +130,10 @@ void check_pagetable(x86_64_pagetable* pagetable);
 //    Change page table after checking it.
 void set_pagetable(x86_64_pagetable* pagetable);
 
+// fork the process 
+pid_t fork();
+
+
 // check_page_table_mappings
 //    Check operating system invariants about kernel mappings for a page
 //    table. Panic if any of the invariants are false.
