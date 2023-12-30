@@ -133,6 +133,9 @@ void set_pagetable(x86_64_pagetable* pagetable);
 // fork the process 
 pid_t fork();
 
+// exit the process
+void exit(pid_t pid);
+
 
 // check_page_table_mappings
 //    Check operating system invariants about kernel mappings for a page

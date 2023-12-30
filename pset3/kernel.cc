@@ -151,8 +151,10 @@ void* kalloc(size_t sz) {
 //    If `kptr == nullptr` does nothing.
 
 void kfree(void* kptr) {
-    (void) kptr;
-    assert(false /* your code here */);
+    if (!kptr) {return;}
+    --physpages[(uintptr_t)kptr/PAGESIZE].refcount;
+    // physpages[(uintptr_t)kptr/PAGESIZE].refcount = 0;
+    log_printf("after exit memory ref is %d\n", physpages[(uintptr_t)kptr/PAGESIZE].refcount);
 }
 
 
@@ -198,7 +200,7 @@ void process_setup(pid_t pid, const char* program_name) {
             // (The handout code requires that the corresponding physical
             // address is currently free.)
             // assert(physpages[(uintptr_t)ptr].refcount == 0);
-            ++physpages[(uintptr_t)ptr].refcount;
+            // ++physpages[(uintptr_t)ptr].refcount;
             vmiter(ptable[pid].pagetable,a).map(ptr, PTE_P | PTE_W | PTE_U); 
         }
     }
@@ -210,13 +212,14 @@ void process_setup(pid_t pid, const char* program_name) {
         memcpy((void*) address_in_p_memory, seg.data(), seg.data_size());
     }
     // mark entry point
+    
     ptable[pid].regs.reg_rip = pgm.entry();
 
     // allocate and map stack segment
     // Compute process virtual address for stack page
     uintptr_t stack_addr = MEMSIZE_VIRTUAL - PAGESIZE;
     void* ptr = kalloc(PAGESIZE);
-    ++physpages[(uintptr_t)ptr].refcount;
+    // ++physpages[(uintptr_t)ptr].refcount;
     // The handout code requires that the corresponding physical address
     // is currently free.
     ptable[pid].regs.reg_rsp = stack_addr + PAGESIZE;
@@ -224,6 +227,7 @@ void process_setup(pid_t pid, const char* program_name) {
 
     // mark process as runnable
     ptable[pid].state = P_RUNNABLE;
+    
 }
 
 
@@ -360,6 +364,10 @@ uintptr_t syscall(regstate* regs) {
     
     case SYSCALL_FORK:
         return fork();
+    
+    case SYSCALL_EXIT:
+        exit(current->pid);
+        schedule();;
 
     default:
         proc_panic(current, "Unhandled system call %ld (pid=%d, rip=%p)!\n",
@@ -422,6 +430,11 @@ pid_t fork(){
     if ( new_pr_pid==PID_MAX ){ log_printf("master return"); return -1; }
 
     ptable[new_pr_pid].pagetable = kalloc_pagetable();
+    if (!ptable[new_pr_pid].pagetable) {
+           log_printf("master prelim pagetable creation returning new PID %d\n", new_pr_pid);
+           exit(new_pr_pid); 
+           return -1;
+    }
     ptable[new_pr_pid].pid = new_pr_pid;
     ptable[new_pr_pid].state = P_RUNNABLE;
     // Setting return value to child, so it known it is a child
@@ -431,25 +444,52 @@ pid_t fork(){
     // Copy memory of kernel
     for (auto old_pt = vmiter(current->pagetable, 0); old_pt.va() < PROC_START_ADDR; old_pt+=PAGESIZE) {
         if (!old_pt.present()) {continue;}
-        vmiter(ptable[new_pr_pid].pagetable,old_pt.va()).map(old_pt.pa(), old_pt.perm());
+        int result = vmiter(ptable[new_pr_pid].pagetable,old_pt.va()).try_map(old_pt.pa(), old_pt.perm());
+        if (result==-1) {
+           log_printf("master prelim pagetable returning new PID %d\n", new_pr_pid);
+           exit(new_pr_pid); 
+           return -1;
+        }
     }
 
     // Allocate memory for a child process
-    for (auto old_pt = vmiter(current->pagetable, PROC_START_ADDR); old_pt.va() <= MEMSIZE_VIRTUAL; old_pt+=PAGESIZE) {
+    for (auto old_pt = vmiter(current->pagetable, PROC_START_ADDR); old_pt.va() < MEMSIZE_VIRTUAL; old_pt+=PAGESIZE) {
         if (!old_pt.present() || !old_pt.user()) {continue;}
 
         void* ptr = kalloc(PAGESIZE);
         if (!ptr) {
+            exit(new_pr_pid);
             log_printf("master prelim returning new PID %d\n", new_pr_pid);
             return -1;
         }
         memcpy(ptr, (void*)old_pt.pa(), PAGESIZE);
-        ++physpages[(uintptr_t)ptr / PAGESIZE].refcount;
-        vmiter(ptable[new_pr_pid].pagetable,old_pt.va()).map(ptr, old_pt.perm());
+        // ++physpages[(uintptr_t)ptr / PAGESIZE].refcount;
+        int result = vmiter(ptable[new_pr_pid].pagetable,old_pt.va()).try_map(ptr, old_pt.perm());
+        if (result==-1) {
+           log_printf("master prelim pagetable returning new PID %d\n", new_pr_pid);
+           kfree(ptr);
+           exit(new_pr_pid); 
+           return -1;
+        }
     }
     log_printf("master returning new PID %d\n", new_pr_pid);
 
     return new_pr_pid;
+}
+
+void exit(pid_t pid){
+     log_printf("exit");
+     ptable[pid].state = P_FREE;
+     if (!ptable[pid].pagetable){return;} 
+     for (vmiter vmiter(ptable[pid].pagetable,0); vmiter.va()<MEMSIZE_VIRTUAL; vmiter+=PAGESIZE){
+        if (vmiter.present()&&vmiter.user()&&vmiter.va()!=CONSOLE_ADDR){
+            kfree((void*)vmiter.pa());
+        }
+     }
+     for (ptiter ptit(ptable[pid].pagetable); !ptit.done(); ptit.next()) {
+		kfree((void*)ptit.pa());
+	}
+     kfree(ptable[pid].pagetable);
 }
 
 // run(p)
