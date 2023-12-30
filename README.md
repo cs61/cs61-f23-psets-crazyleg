@@ -11,4 +11,4 @@ https://cs61.seas.harvard.edu/
 Currently present solutions:
 
  - Pset 1 - up to problem 31
- - Pset 3 - Weensy OS
+ - Pset 3 - Weensy OS - full solution Sets 1-7
