@@ -1,14 +1,4 @@
 CS 61 Problem Set 3
 ===================
 
-**Fill out both this file and `AUTHORS.md` before submitting.** We grade
-anonymously, so put all personally identifying information, including
-collaborators, in `AUTHORS.md`.
-
-Grading notes (if any)
-----------------------
-
-
-
-Extra credit attempted (if any)
--------------------------------
+CS 61 Harvard Problem Set 3 - Weensy OS - hopefully correct solution for Stages 1-7, without extra credits. Not a student, just online learning. 
