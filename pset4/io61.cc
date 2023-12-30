@@ -14,6 +14,19 @@
 struct io61_file {
     int fd = -1;     // file descriptor
     int mode;        // open mode (O_RDONLY or O_WRONLY)
+    // `bufsiz` is the cache block size
+    static constexpr off_t bufsize = 4096*16;
+    // Cached data is stored in `cbuf`
+    unsigned char cbuf[bufsize];
+
+    // The following “tags” are addresses—file offsets—that describe the cache’s contents.
+    // `tag`: File offset of first byte of cached data (0 when file is opened).
+    off_t tag = 0;
+    // `end_tag`: File offset one past the last byte of cached data (0 when file is opened).
+    off_t end_tag = 0;
+    // `pos_tag`: Cache position: file offset of the cache.
+    // In read caches, this is the file offset of the next character to be read.
+    off_t pos_tag = 0;
 };
 
 
@@ -27,6 +40,7 @@ io61_file* io61_fdopen(int fd, int mode) {
     io61_file* f = new io61_file;
     f->fd = fd;
     f->mode = mode;
+   
     return f;
 }
 
@@ -47,19 +61,35 @@ int io61_close(io61_file* f) {
 //    which equals -1, on end of file or error.
 
 int io61_readc(io61_file* f) {
-    unsigned char ch;
-    ssize_t nr = read(f->fd, &ch, 1);
-    if (nr == 1) {
+    // Check if the next character is in the cache
+    if (f->pos_tag < f->end_tag) {
+        // Read the character from the cache
+        unsigned char ch = f->cbuf[f->pos_tag - f->tag];
+        f->pos_tag += 1;
         return ch;
-    } else if (nr == 0) {
-        errno = 0; // clear `errno` to indicate EOF
-        return -1;
-    } else {
-        assert(nr == -1 && errno > 0);
+    }
+
+    // Cache miss, need to read more data into the cache
+    f->tag = f->pos_tag;
+    ssize_t nr = read(f->fd, f->cbuf, io61_file::bufsize);
+    if (nr <= 0) {
+        // Either an error occurred, or we hit EOF
+        if (nr == 0) {
+            errno = 0; // clear `errno` to indicate EOF
+        } else {
+            assert(nr == -1 && errno > 0);
+        }
         return -1;
     }
-}
 
+    // Update cache tags
+    f->end_tag = f->tag + nr;
+
+    // Now the cache is refilled, return the next character
+    unsigned char ch = f->cbuf[0];
+    f->pos_tag += 1;
+    return ch;
+}
 
 // io61_read(f, buf, sz)
 //    Reads up to `sz` bytes from `f` into `buf`. Returns the number of
@@ -72,22 +102,31 @@ int io61_readc(io61_file* f) {
 //    This is called a “short read.”
 
 ssize_t io61_read(io61_file* f, unsigned char* buf, size_t sz) {
-    // size_t nread = 0;
-    ssize_t nr = read(f->fd, buf, sz);
-    return nr;
-    // while (nread != sz) {
-    //     int ch = io61_readc(f);
-    //     if (ch == EOF) {
-    //         break;
-    //     }
-    //     buf[nread] = ch;
-    //     ++nread;
-    // }
-    // if (nread != 0 || sz == 0 || errno == 0) {
-    //     return nread;
-    // } else {
-    //     return -1;
-    // }
+size_t nread = 0; // Number of bytes read
+
+    while (nread < sz) {
+        // Check if there's data in the cache
+        if (f->pos_tag < f->end_tag) {
+            // Calculate the number of bytes to copy from the cache
+            size_t ncache = std::min(sz - nread, static_cast<size_t>(f->end_tag - f->pos_tag));
+            memcpy(buf + nread, f->cbuf + (f->pos_tag - f->tag), ncache);
+            nread += ncache;
+            f->pos_tag += ncache;
+        }
+
+        // If we still need more data, read from the file
+        if (nread < sz) {
+            f->tag = f->pos_tag;
+            ssize_t nr = read(f->fd, f->cbuf, io61_file::bufsize);
+            if (nr <= 0) {
+                // Either an error occurred, or we hit EOF
+                return nread > 0 ? nread : nr;
+            }
+            f->end_tag = f->tag + nr;
+        }
+    }
+
+    return nread;
 }
 
 
@@ -97,12 +136,26 @@ ssize_t io61_read(io61_file* f, unsigned char* buf, size_t sz) {
 
 int io61_writec(io61_file* f, int c) {
     unsigned char ch = c;
-    ssize_t nw = write(f->fd, &ch, 1);
-    if (nw == 1) {
-        return 0;
-    } else {
-        return -1;
+    // If the cache is full, flush it
+    if (f->pos_tag - f->tag >= io61_file::bufsize) {
+        ssize_t nw = write(f->fd, f->cbuf, f->pos_tag - f->tag);
+        if (nw <= 0) {
+            // Either an error occurred, or couldn't write anything
+            return -1;
+        }
+        f->tag = f->pos_tag = 0; // Reset cache
     }
+
+    // Store the character in the cache
+    f->cbuf[f->pos_tag - f->tag] = ch;
+    f->pos_tag++;
+
+    // Update end_tag
+    if (f->pos_tag > f->end_tag) {
+        f->end_tag = f->pos_tag;
+    }
+
+    return 0; // Success
 }
 
 
@@ -114,20 +167,38 @@ int io61_writec(io61_file* f, int c) {
 //    before the error occurred.
 
 ssize_t io61_write(io61_file* f, const unsigned char* buf, size_t sz) {
-    ssize_t nr = write(f->fd, buf, sz);
-    return nr;
-    // size_t nwritten = 0;
-    // while (nwritten != sz) {
-    //     if (io61_writec(f, buf[nwritten]) == -1) {
-    //         break;
-    //     }
-    //     ++nwritten;
-    // }
-    // if (nwritten != 0 || sz == 0) {
-    //     return nwritten;
-    // } else {
-    //     return -1;
-    // }
+   size_t nwritten = 0; // Number of bytes written
+
+    while (nwritten < sz) {
+        // Calculate space available in the cache
+        size_t ncache = std::min(sz - nwritten, static_cast<size_t>(io61_file::bufsize - (f->pos_tag - f->tag)));
+
+        // If the cache is full, flush it
+        if (ncache == 0) {
+            ssize_t nw = io61_flush(f);
+            if (nw == -1) {
+                // If flush failed and nothing was written, return -1
+                // Otherwise, return the number of bytes written so far
+                if (errno == EINTR || errno == EAGAIN) {
+                    continue;
+                }
+                return nwritten > 0 ? nwritten : -1;
+            }
+            continue;
+        }
+
+        // Copy data into the cache
+        memcpy(f->cbuf + (f->pos_tag - f->tag), buf + nwritten, ncache);
+        nwritten += ncache;
+        f->pos_tag += ncache;
+
+        // Update end_tag
+        if (f->pos_tag > f->end_tag) {
+            f->end_tag = f->pos_tag;
+        }
+    }
+
+    return nwritten;
 }
 
 
@@ -140,23 +211,58 @@ ssize_t io61_write(io61_file* f, const unsigned char* buf, size_t sz) {
 //    drop any data cached for reading.
 
 int io61_flush(io61_file* f) {
-    (void) f;
+    if (f->pos_tag > f->tag) {
+        while (true) {
+            ssize_t nw = write(f->fd, f->cbuf, f->pos_tag - f->tag);
+            if (nw > 0) {
+                // Move the unwritten part of the cache to the beginning
+                memmove(f->cbuf, f->cbuf + nw, f->pos_tag - f->tag - nw);
+                f->tag += nw;
+                if (f->tag == f->pos_tag) { // Cache fully flushed
+                    f->tag = f->pos_tag = f->end_tag = 0; // Reset cache
+                    break;
+                }
+            } else if (errno != EINTR && errno != EAGAIN) {
+                // Non-recoverable error
+                return -1;
+            }
+            // If errno is EINTR or EAGAIN, retry the write
+        }
+    }
     return 0;
 }
-
-
 // io61_seek(f, off)
 //    Changes the file pointer for file `f` to `off` bytes into the file.
 //    Returns 0 on success and -1 on failure.
 
 int io61_seek(io61_file* f, off_t off) {
-    off_t r = lseek(f->fd, (off_t) off, SEEK_SET);
-    // Ignore the returned offset unless it’s an error.
-    if (r == -1) {
-        return -1;
-    } else {
-        return 0;
+// Flush the cache if in write mode and cache is not empty
+    if ((f->mode == O_WRONLY || f->mode == O_RDWR) && f->pos_tag != f->tag) {
+        ssize_t nw = write(f->fd, f->cbuf, f->pos_tag - f->tag);
+        if (nw <= 0) {
+            // Handle write error
+            return -1;
+        }
+        f->tag = f->pos_tag = f->end_tag = 0; // Reset cache
     }
+
+    // Update cache state for read mode
+    if ((f->mode == O_RDONLY || f->mode == O_RDWR) && off >= f->tag && off < f->end_tag) {
+        // Seek within the cache
+        f->pos_tag = off;
+    } else {
+        // Invalidate the cache since we are seeking outside of it
+        f->tag = f->end_tag = f->pos_tag = off;
+    }
+
+    // Perform the actual seek
+    off_t r = lseek(f->fd, off, SEEK_SET);
+    if (r == -1) {
+        // Handle seek error
+        return -1;
+    }
+
+    return 0;
 }
 
 
